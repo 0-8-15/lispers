@@ -104,15 +104,26 @@ use std::{rc::Rc};
 
 #[derive(Clone)]
 pub enum Op<S: lispers_common::Symbol> {
+  // basic
   FetchGle(S), // read global variable
   RefRTE(usize, usize),
   If(Rc<Op<S>>, Rc<Op<S>>, Rc<Op<S>>),
+  If2(Rc<Op<S>>, Rc<Op<S>>),
+  If2Branch(Rc<Op<S>>, Rc<Op<S>>),
   Finish(Value<S>),
   Enclose(Function<S>), // close over rte
   Apply(Rc<Op<S>>, Vec<Rc<Op<S>>>),
+  // experimental
+  ReturnToHost,
+  EvaluateAll(usize, Vec<Rc<Op<S>>>), // temporary to be removed
+  // garbage
   PRINTLN(Vec<Rc<Op<S>>>), // FIXME: can't get that to work properly
-
-  AssignLex(usize, usize, Rc<Op<S>>),
+  PRINTLNToValues, // needs to know the interpreter's format_value
+  // assignment
+  AssignLex(Rc<Op<S>>, Rc<Op<S>>), // 1st: reference, 2nd: value
+  LexStore(usize, usize),
+  AssignGlobal(Rc<Op<S>>, Rc<Op<S>>),
+  GlobalStore(S),
 }
 
 pub type RtOp<S> = Rc<Op<S>>;

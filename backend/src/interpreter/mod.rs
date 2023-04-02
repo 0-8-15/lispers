@@ -4,7 +4,7 @@ use lispers_common::{StringInterner, Backend, Symbol};
 use lispers_frontend::{SExpression, Literal};
 use crate::prelude::*;
 use crate::data::{Value, List, Function};
-use crate::env::{Env, default_env, RTE};
+use crate::env::{Env, default_env, RTE, ContinuationChain, RtContinuationChain};
 
 use crate::utils::assert_exactly_args;
 
@@ -13,11 +13,12 @@ pub struct Interpreter<S: Symbol, B: Backend<S>> {
   marker: std::marker::PhantomData<S>,
 }
 
-pub type RtArgs<S> = (Rc<RefCell<Env<S>>>, Rc<RefCell<RTE<S>>>, Rc<Op<S>>);
+type GLE<S> = Rc<RefCell<Env<S>>>;
+pub type RtArgs<S> = (GLE<S>, Rc<RefCell<RTE<S>>>, Rc<Op<S>>, RtContinuationChain<S>);
 pub type RtThunk<S> = Promise<RtArgs<S>, Result<Value<S>>>;
 
-pub fn make_delay<S: Symbol>(gle: Rc<RefCell<Env<S>>>, rte: Rc<RefCell<RTE<S>>>, func: Rc<Op<S>>) -> RtArgs<S> {
-  return (gle, rte, func)
+pub fn make_delay<S: Symbol>(gle: Rc<RefCell<Env<S>>>, rte: Rc<RefCell<RTE<S>>>, func: Rc<Op<S>>, cc: RtContinuationChain<S>) -> RtArgs<S> {
+  return (gle, rte, func, cc)
 }
 
 pub fn make_op_global_ref<S: Symbol>(sym: S) -> RtOp<S> { return Rc::new(Op::FetchGle(sym)) }
@@ -25,12 +26,15 @@ pub fn make_op_lexical_ref<S: Symbol>(depth: i64, index: i64) -> RtOp<S> {
  return Rc::new(Op::RefRTE(depth as usize, index as usize))
 }
 pub fn make_op_if<S: Symbol>(test: RtOp<S>, then: RtOp<S>, other: RtOp<S>) -> RtOp<S> { return Rc::new(Op::If(test, then, other)) }
+pub fn make_op_if2<S: Symbol>(test: RtOp<S>, then: RtOp<S>, other: RtOp<S>) -> RtOp<S> { return Rc::new(Op::If2(test, Rc::new(Op::If2Branch(then, other)))) }
 pub fn make_op_finish<S: Symbol>(value: Value<S>) -> RtOp<S> { return Rc::new(Op::Finish(value)) }
 pub fn make_op_enclose<S: Symbol>(func: Function<S>) -> RtOp<S> { return Rc::new(Op::Enclose(func)) }
 pub fn make_op_apply<S: Symbol>(func: RtOp<S>, args: Vec<RtOp<S>>) -> RtOp<S> { return Rc::new(Op::Apply(func, args)) }
 pub fn make_op_println<S: Symbol>(args: Vec<RtOp<S>>) -> RtOp<S> { return Rc::new(Op::PRINTLN(args)) }
 
-pub fn make_op_assign_lex<S: Symbol>(depth: usize, index: usize, value: RtOp<S>)  -> RtOp<S> { return Rc::new(Op::AssignLex(depth, index, value)) }
+pub fn make_op_assign_lex<S: Symbol>(depth: usize, index: usize, value: RtOp<S>)  -> RtOp<S> { return Rc::new(Op::AssignLex(Rc::new(Op::LexStore(depth, index)), value)) }
+
+pub fn make_op_assign_global<S: Symbol>(name: S, value: RtOp<S>)  -> RtOp<S> { return Rc::new(Op::AssignGlobal(Rc::new(Op::GlobalStore(name.clone())), value)) }
 
 mod builtins;
 
@@ -83,7 +87,7 @@ impl<S: Symbol, B: Backend<S>> Interpreter<S, B> {
           format!("[function {:p} code {:p}]", lambda, lambda.code.as_ref())
         },
         Function::Closure(rte, arity, code) => {
-          format!("[closure arity {:}code {:p} {:}]", arity, code.as_ref(), rte.borrow().format())
+          format!("[closure arity {:} code {:p} {:}]", arity, code.as_ref(), rte.borrow().format())
         },
       },
     }
@@ -177,6 +181,55 @@ impl<S: Symbol, B: Backend<S>> Interpreter<S, B> {
     }
   }
 
+  pub fn truish(&self, value: Value<S>) -> bool {
+    match value {
+      Value::Boolean(val) => {
+        if val {true}
+        else {false}
+      }
+      _value => {true}
+    }
+  }
+
+  pub fn apply_code_code(&mut self, gle: Rc<RefCell<Env<S>>>, rte: Rc<RefCell<RTE<S>>>, op: &Rc<Op<S>>, args: &Vec<Rc<Op<S>>>, cc: RtContinuationChain<S>) -> RtThunk<S> {
+      // println!("Op::Apply {:}", rte.borrow().format());
+      let args_count = args.len();
+      let mut val_args : Vec<Value<S>> = Vec::with_capacity(args_count);
+
+      for arg in args {
+         match self.exec_evaluation(&gle, rte.clone(), arg) {
+           Ok(arg) => { val_args.push(arg) }
+           err => { return Done(err) }
+         }
+       }
+
+       match self.exec_evaluation(&gle, rte, op) {
+         Ok(Value::Function(Function::NativeFn(native_func))) => {
+          match native_func(gle.clone(), val_args) {
+            Ok(val) => { return self.finish1(gle, cc, &val) }
+            err => { return Done(err) }
+          }
+        }
+
+        Ok(Value::Function(Function::Closure(ref irte, arity, ref code))) => {
+          match assert_exactly_args(arity, args_count) {
+            Err(err) => { return Done(Err(err)) }
+            _ => {}
+          }
+          let rte = RTE::extend(irte.clone(), val_args);
+          Delay((gle, rte, code.clone(), cc))
+        }
+        Ok(value) => {
+          let func : Result<Function<S>> = value.try_into();
+          match func {
+            Err(err) => { return Done(Err(err)) }
+            Ok(_func) => {return Done(Err(RuntimeError::NYIE{detail: "ret42 strange case 69a".to_string()}))}
+          }
+        }
+        Err(err) => { return Done(Err(err)) }
+      }
+    }
+
   pub fn enclose(&mut self, rte: Rc<RefCell<RTE<S>>>, func: &Function<S>) -> Value<S> {
     // println!(" Enclose {:} ", rte.borrow().format());
     match func {
@@ -193,107 +246,140 @@ impl<S: Symbol, B: Backend<S>> Interpreter<S, B> {
     }
   }
 
+  fn finish1(&self, gle: GLE<S>, cc: RtContinuationChain<S>, value: &Value<S>) -> RtThunk<S> {
+    match cc {
+      None => { return Done(Ok(value.clone())) }
+      Some(cc) => {
+        let rte = RTE::extend(cc.rte.clone(), vec!(value.clone()));
+    println!("Finish {:} ", rte.borrow().format());
+        return Delay((gle, rte, cc.code.clone(), cc.up.clone()))
+      }
+    }
+  }
+
   pub fn ret42(&mut self, content: RtArgs<S>) -> RtThunk<S> {
-  let (gle, rte, op) = content;
+  let (gle, rte, op, cc) = content;
   match op.as_ref() {
     Op::RefRTE(depth, index) => {
       // println!("RefRTE {:} depth {:} index {:}", rte.borrow().format(), depth, index);
       if let Some(value) = rte.borrow().get(*depth, *index) {
-        return Done(Ok(value))
+        self.finish1(gle, cc, &value)
       } else {
         return Done(Err(RuntimeError::UndefinedSymbol{detail: "detail lost at runtime".to_string()} ))
       }
     }
     Op::FetchGle(ref sym) => {
       // println!("Op::FetchGle {:} sym {:}", rte.borrow().format(), self.interner.resolve(*sym).unwrap_or("<>").to_string());
-      return Done(gle.borrow().get(*sym).ok_or_else(|| RuntimeError::UndefinedSymbol {
-             detail: self.interner.resolve(*sym).unwrap_or("<>").to_string()
-             }))
+      let result = gle.borrow().get(*sym);
+      if let Some(result) = result {
+        self.finish1(gle, cc, &result)
+      } else {
+        Done(Err(RuntimeError::NYIE{detail: "FetchGle no result".to_string()}))
+      }
     }
     Op::If(test, then, otherwise) => {
       // println!("If {:} ", rte.borrow().format());
       match self.exec_evaluation(&gle, rte.clone(), test) {
-        Ok(Value::Boolean(val)) => {
-          if val {return Delay((gle, rte, then.clone()))}
-          else {return Delay((gle, rte, otherwise.clone()))}
+        Ok(val) => {
+          if self.truish(val) {return Delay((gle, rte, then.clone(), cc))}
+          else {return Delay((gle, rte, otherwise.clone(), cc))}
         }
-        Ok(_) => {return Delay((gle, rte, then.clone()))}
         other => Done(other)
       }
     }
-    Op::Enclose(func) => { return Done(Ok(self.enclose(rte, func))) }
-    Op::Apply(op, args) => {
-      // println!("Op::Apply {:}", rte.borrow().format());
-      let args_count = args.len();
-      let mut val_args : Vec<Value<S>> = Vec::with_capacity(args_count);
+    Op::If2(test, branch) => {
+      println!("If2 {:} ", rte.borrow().format());
+      // let cont = Delay((gle, rte.clone(), branch.clone()));
+      //let mut rte = rte;
+      //let rte = RTE::set_continuation(&mut rte, branch.clone());
+      return Delay((gle, rte, test.clone(), cc))
+    }
+    Op::If2Branch(then, otherwise) => {
+      println!("If2Branch {:} ", rte.borrow().format());
+      let x = { rte.borrow_mut().values.pop() };
+      match x {
+        Some(val) => {
+          if self.truish(val) {return Delay((gle, rte, then.clone(), cc))}
+          else {return Delay((gle, rte, otherwise.clone(), cc))}
+        }
+        _ => { return Done(Err(RuntimeError::NYIE{detail: "If2Branch missing test result".to_string()})) }
+      }
+    }
+    Op::Enclose(func) => {
+      let result = self.enclose(rte, func); return self.finish1(gle, cc, &result)
+    }
+    Op::Apply(op, args) => { self.apply_code_code(gle, rte, op, args, cc) }
+    Op::EvaluateAll(_index, input) => {
+      match cc {
+        None => { Done(Err(RuntimeError::NYIE{detail: "EvaluateAll w/o continuation".to_string()})) }
+        Some(cc) => {
+      let args_count = input.len();
+      let mut val_args: Vec<Value<S>> = Vec::with_capacity(args_count);
 
-      for arg in args {
+      for arg in input {
          match self.exec_evaluation(&gle, rte.clone(), arg) {
            Ok(arg) => { val_args.push(arg) }
            err => { return Done(err) }
          }
-       }
-
-       match self.exec_evaluation(&gle, rte, op) {
-         Ok(Value::Function(Function::NativeFn(native_func))) => {
-          match native_func(gle.clone(), val_args) {
-            Ok(val) => { return Done(Ok(val)) }
-            err => { return Done(err) }
-          }
+      }
+          let rte = RTE::extend(cc.rte.clone(), val_args);
+          Delay((gle, rte, cc.code.clone(), cc.up.clone()))
         }
-
-        Ok(Value::Function(Function::Closure(ref irte, arity, ref code))) => {
-          match assert_exactly_args(arity, args_count) {
-            Err(err) => { return Done(Err(err)) }
-            _ => {}
-          }
-          let rte = RTE::extend(irte.clone(), val_args);
-          Delay((gle, rte, code.clone()))
+      }
+    }
+    Op::ReturnToHost => { // FIXME: do we need that ever?
+      println!("Op::ReturnToHost {:}", rte.borrow().format());
+      match cc {
+        None => { return Done(Ok(Value::default())) } // FIXME
+        Some(cc) => {
+          return Delay((gle, cc.rte.clone(), cc.code.clone(), cc.up.clone()))
         }
-        Ok(value) => {
-          let func : Result<Function<S>> = value.try_into();
-          match func {
-            Err(err) => { return Done(Err(err)) }
-            Ok(_func) => {return Done(Err(RuntimeError::NYIE{detail: "ret42 strange case 69a".to_string()}))}
-          }
-        }
-        Err(err) => { return Done(Err(err)) }
       }
     }
     Op::Finish(val) => {
-      // println!("Op::Finish {:} => {}", rte.borrow().format(), self.format_value(&val));
-      return Done(Ok(val.clone()))
+      //println!("Op::Finish {:} => {}", rte.borrow().format(), self.format_value(&val));
+      self.finish1(gle, cc, val)
     }
-    Op::PRINTLN(args) => { // FIXME: can't get that to work properly
-      // println!("Op::PRINTLN {:}", rte.borrow().format());
-      let args_count = args.len();
-      let mut val_args : Vec<Value<S>> = Vec::with_capacity(args_count);
+    Op::PRINTLNToValues => {
+      // println!("Op::PRINTLNToValues {:}", rte.format());
+      let values = RTE::into_ret_values(rte);
 
-      for arg in args {
-         match self.exec_evaluation(&gle, rte.clone(), arg) {
-           Ok(arg) => { val_args.push(arg) }
-           err => { return Done(err) }
-         }
-      }
-
-      let output = val_args
+      let output = values
         .iter()
         .map(|val| self.format_value(val))
         .collect::<Vec<String>>()
         .join(" ");
 
       println!("{}", output);
-      Done(Ok(Value::default()))
+      self.finish1(gle, cc, &Value::default())
     }
-    Op::AssignLex(depth, index, value) => {
-      // println!("AssignLex {:} depth {:} index {:}", rte.borrow().format(), depth, index);
-      match self.exec_evaluation(&gle, rte.clone(), value) {
-        Ok(value) => {
-          rte.borrow_mut().set(*depth, *index, value.clone());
-          return Done(Ok(value))
-        }
-        err => { return Done(err) }
-      }
+    Op::PRINTLN(args) => { // FIXME: can't get that to work properly
+      // println!("Op::PRINTLN {:}", rte.borrow().format());
+      let cc = ContinuationChain::cons(cc, rte.clone(), Rc::new(Op::PRINTLNToValues));
+      let start = Rc::new(Op::EvaluateAll(0, args.to_vec()));
+      Delay((gle, rte, start, cc))
+    }
+    Op::AssignLex(location, value) => {
+      // println!("AssignLex {:} ", rte.borrow().format());
+      let cc = ContinuationChain::cons(cc, rte.clone(), location.clone());
+      Delay((gle, rte, value.clone(), cc))
+    }
+    Op::LexStore(depth, index) => {
+     if let Some(value) = rte.borrow().get(0, 0) {
+       rte.borrow_mut().set(*depth, *index, value.clone());
+       self.finish1(gle, cc, &value)
+     } else {return Done(Err(RuntimeError::NYIE{detail: "LexStore no value to store".to_string()}))}
+    }
+    Op::AssignGlobal(name, value) => {
+      // println!("AssignGlobal {:} name {:}", rte.borrow().format(), self.interner.resolve(*name).unwrap_or("<>").to_string());
+      let cc = ContinuationChain::cons(cc, rte.clone(), name.clone());
+      Delay((gle, rte, value.clone(), cc))
+    }
+    Op::GlobalStore(name) => {
+     if let Some(value) = rte.borrow().get(0, 0) {
+       match gle.borrow_mut().set(*name, value.clone()) { _ => {} }
+       self.finish1(gle, cc, &value)
+     } else {return Done(Err(RuntimeError::NYIE{detail: "GlobalStore no value to store".to_string()}))}
     }
     // _ => {return Done(Err(RuntimeError::NYIE{detail: "ret42 Opcode".to_string()}))}
     }
@@ -306,7 +392,8 @@ impl<S: Symbol, B: Backend<S>> Interpreter<S, B> {
     todo: &Rc<Op<S>>
   ) -> Result<Value<S>> {
     let ret23 = |rt| self.ret42(rt);
-    return force_promise(ret23, make_delay(global_env.clone(), env, todo.clone()))
+    let cc = None; // ContinuationChain::initial(env.clone());
+    return force_promise(ret23, make_delay(global_env.clone(), env, todo.clone(), cc))
   }
 
   pub fn eval_expression(

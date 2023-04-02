@@ -5,7 +5,8 @@ use crate::prelude::*;
 use crate::data::{Value, Sym, List, Function, Lambda};
 use crate::env::{Env};
 use super::Interpreter;
-use super::{make_op_apply, make_op_if, make_op_enclose, make_op_println, make_op_assign_lex};
+use super::{make_op_apply, make_op_if, make_op_enclose, make_op_println};
+use super::{make_op_assign_lex, make_op_assign_global};
 
 use crate::utils::{assert_exactly_args, assert_at_least_args};
 
@@ -109,8 +110,8 @@ impl<S: Symbol, B: Backend<S>> Interpreter<S, B> {
             detail: self.interner.resolve(sym).unwrap_or("<>").to_string()
         })
       } else {
-        // Ok(make_op_global_ref(sym))
-        Err(RuntimeError::NYIE{detail: "set! for global variables not yet implemented".to_string()})      }
+        Ok(make_op_assign_global(sym, val))
+      }
     } else {
       Ok(make_op_assign_lex(depth as usize, index as usize, val))
     }

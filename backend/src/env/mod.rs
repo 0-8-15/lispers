@@ -92,7 +92,7 @@ impl<S: Symbol> Env<S> {
 
 pub struct RTE<S: Symbol> {
   parent: Option<Rc<RefCell<RTE<S>>>>,
-  values: Vec<Value<S>>,
+  pub values: Vec<Value<S>>,
 }
 
 impl<S: Symbol> RTE<S> {
@@ -104,6 +104,7 @@ impl<S: Symbol> RTE<S> {
   }
 
   pub fn extend(parent: Rc<RefCell<RTE<S>>>, values: Vec<Value<S>>) -> Rc<RefCell<Self>>  {
+    //let cont = parent.borrow().continuation.clone();
     Rc::new(RefCell::new(Self {
       parent: Some(parent),
       values: values,
@@ -135,10 +136,11 @@ impl<S: Symbol> RTE<S> {
     }
   }
 
-  pub fn gimmithevaluespleaseatallcost(&mut self) -> Vec<Value<S>> {
-    let mut result: Vec<Value<S>> = Vec::with_capacity(self.values.len());
-    for val in &self.values { result.push(val.clone()) }
-    return result;
+  pub fn into_ret_values(mut from: Rc<RefCell<RTE<S>>>) -> Vec<Value<S>> {
+    match Rc::try_unwrap(from) {
+      Ok(cell) => { cell.into_inner().values }
+      Err(from) => { from.borrow().values.to_vec() }
+    }
   }
 
   pub fn print(&self, msg: String) {
@@ -158,3 +160,33 @@ impl<S: Symbol> RTE<S> {
   }
 
 }
+
+use crate::prelude::{Op, RtOp};
+
+pub struct ContinuationChain<S: Symbol> {
+  pub  up: Option<Rc<ContinuationChain<S>>>,
+  pub rte: Rc<RefCell<RTE<S>>>,
+  pub code: RtOp<S>,
+}
+
+impl<S: Symbol> ContinuationChain<S> {
+  pub fn new(rte: Rc<RefCell<RTE<S>>>, code: RtOp<S>) -> Option<Rc<Self>> {
+    Some(Rc::new({ContinuationChain {
+       up: None,
+       rte: rte,
+       code: code,
+    }}))
+  }
+  pub fn initial(rte: Rc<RefCell<RTE<S>>>) -> Option<Rc<Self>> {
+    ContinuationChain::new(rte, Rc::new(Op::ReturnToHost))
+  }
+  pub fn cons(up: Option<Rc<ContinuationChain<S>>>, rte: Rc<RefCell<RTE<S>>>, code: RtOp<S>) -> Option<Rc<Self>> {
+    Some(Rc::new({ContinuationChain {
+       up: up,
+       rte: rte,
+       code: code,
+    }}))
+  }
+}
+
+pub type RtContinuationChain<S> = Option<Rc<ContinuationChain<S>>>;
