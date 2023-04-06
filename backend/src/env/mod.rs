@@ -93,13 +93,23 @@ impl<S: Symbol> Env<S> {
 pub struct RTE<S: Symbol> {
   parent: Option<Rc<RefCell<RTE<S>>>>,
   pub values: Vec<Value<S>>,
+//  #[cfg(Debug)] n: usize,
 }
 
+//static mut allo : usize = 0;
 impl<S: Symbol> RTE<S> {
+  pub fn up(&self) -> Rc<RefCell<RTE<S>>> {
+    match &self.parent {
+      None => RTE::new(),
+      Some(parent) => parent.clone()
+    }
+  }
+
   pub fn new() -> Rc<RefCell<Self>> {
     Rc::new(RefCell::new(Self {
       parent: None,
       values: Vec::new(),
+//#[cfg(Debug)] n: unsafe { let x=allo; allo=x+1; x}
     }))
   }
 
@@ -108,6 +118,7 @@ impl<S: Symbol> RTE<S> {
     Rc::new(RefCell::new(Self {
       parent: Some(parent),
       values: values,
+//#[cfg(Debug)] n: unsafe { let x=allo; allo=x+1; x}
     }))
   }
 
@@ -136,25 +147,34 @@ impl<S: Symbol> RTE<S> {
     }
   }
 
-  pub fn into_ret_values(mut from: Rc<RefCell<RTE<S>>>) -> Vec<Value<S>> {
+  pub fn into_ret_values(from: Rc<RefCell<RTE<S>>>) -> Vec<Value<S>> {
     match Rc::try_unwrap(from) {
       Ok(cell) => { cell.into_inner().values }
       Err(from) => { from.borrow().values.to_vec() }
     }
   }
 
-  pub fn print(&self, msg: String) {
+  pub fn print<F>(&self, msg: String, f: F) -> () where F: Fn(&Value<S>) -> String {
    println!("{} rte {:p} {}", msg, self, self.values.len());
-  }
-
-  pub fn printall(&self, msg: String) {
-   println!("{} rte {:p} {}", msg, self, self.values.len());
-   if let Some(parent) = &self.parent {
-     print!("   parent: {:p}", parent.as_ref());
-     parent.borrow().print("   ".to_string());
+   for i in 0 .. self.values.len() {
+     println!(" {} {}", i, f(&self.values[i]))
    }
   }
 
+  fn printall0<F>(&self, msg: &String, f: F) -> () where F: Fn(&Value<S>) -> String {
+//   println!("{} rte {:p} {} #{}", msg, self, self.values.len(), self.n);
+   for i in 0 .. self.values.len() {
+     println!(" {} {}", i, f(&self.values[i]))
+   }
+   if let Some(parent) = &self.parent {
+     print!("   parent: {:p}", parent.as_ref());
+     parent.borrow().printall0(&"   ".to_string(), f);
+   }
+  }
+  pub fn printall<F>(&self, msg: String, f: F) -> () where F: Fn(&Value<S>) -> String {
+     self.printall0(&msg, f);
+     println!("--- {}", msg);
+  }
   pub fn format(&self) -> String {
    return format!("rte {:p} {}", self, self.values.len())
   }
